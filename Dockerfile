@@ -2,19 +2,13 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# 1. 安装基础编译环境
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# 2. 核心解决点：先升级 pip、setuptools 和 wheel
-RUN pip install -v --no-cache-dir --upgrade pip setuptools wheel -i https://mirrors.aliyun.com/pypi/simple/
+# 先升级基础工具
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel -i https://mirrors.aliyun.com/pypi/simple/
 
 COPY requirements.txt .
 
-# 3. 安装依赖（换用更稳定的阿里云源）
-RUN pip install --no-cache-dir -r requirements.txt \
+# 关键：加上 --only-binary=:all: 强制下载编译好的 .whl 包，避免本地耗时编译！
+RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com
 
