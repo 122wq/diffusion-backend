@@ -1,90 +1,55 @@
-import numpy as np
-import onnxruntime as ort
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from scipy.special import softmax
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field
+from typing import Optional
 
-app = FastAPI(title="Diffusion Model Risk Predictor")
+app = FastAPI(title="微信云托管心血管风险评估服务")
 
-# Enable CORS for Flutter communication
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 1. 定义请求数据格式（对应小程序的入参）
+class RiskPredictRequest(BaseModel):
+    cfbg: float = Field(..., description="Clinical Systolic BP / Glucose")
+    cDBP: float = Field(..., description="Clinical Diastolic BP")
+    eGFR: float = Field(..., description="Estimated GFR")
+    bmi: float = Field(..., description="Body Mass Index")
+    nraas_drug_use: float = Field(..., description="0.0 或 1.0")
+    hypertension_history: float = Field(..., description="0.0 或 1.0")
+    age: float = Field(..., ge=0, le=100, description="年龄 0-100")
 
+# 2. 健康检查接口（云托管容器存活探针）
+@app.get("/")
+def health_check():
+    return {"status": "ok", "message": "FastAPI on WeChat CloudBase is running!"}
 
-# Load ONNX session once at startup
-try:
-    sess = ort.InferenceSession("onnx_diffusion.onnx")
-except Exception as e:
-    print(f"Error loading ONNX model: {e}")
-    sess = None
-
-
-class PredictionData(BaseModel):
-    cfbg: float
-    cDBP: float
-    eGFR: float
-    bmi: float
-    nraas_drug_use: float
-    hypertension_history: float
-    age: float
-
-
-
-# --- Protected Prediction Endpoint ---
+# 3. 核心风险预测 API  
 @app.post("/predict")
-async def predict_data(
-    data: PredictionData, 
- # 2. FIX: Protect route with OAuth2 token dependency
+def predict_risk(
+    payload: RiskPredictRequest,
+    # 微信云托管会自动在请求头中注入用户的 OpenID，无需额外传 token 鉴权
+    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
 ):
-    if sess is None:
-        raise HTTPException(status_code=500, detail="ONNX model is not loaded on the server.")
-        
     try:
-        # Prepare 7 input variables
-        cond_input = np.array([[
-            data.cfbg, 
-            data.cDBP, 
-            data.eGFR, 
-            data.bmi, 
-            data.nraas_drug_use, 
-            data.hypertension_history, 
-            data.age
-        ]]).astype(np.float32)
+        # TODO: 这里替换为你训练好的机器学习模型预测逻辑 (如 model.predict)
+        # 示例：简单逻辑计算模拟
+        score = (payload.age * 0.3) + (payload.bmi * 0.4) + (payload.cDBP * 0.2)
+        percentage = min(int(score), 99)
 
-        # Run ONNX inference
-        outputs = sess.run(
-            None,
-            {
-                "cond": cond_input,
-                "t": np.array([500], dtype=np.float32),  # diffusion timestep
-            }
-        )
-        
-        # Raw logit processing
-        output_fake = outputs[0]
-        output_fake = softmax(output_fake, axis=1)
-        
-        # Extract scalar probability
-        output_val = float(output_fake[0, 1])
-
-        # Classify patient risk
-        if output_val > 0.692:
-            risk = "High Risk"
-        elif output_val > 0.515:
-            risk = "Medium Risk"
+        if percentage > 70:
+            risk_level = "High Risk"
+        elif percentage > 40:
+            risk_level = "Medium Risk"
         else:
-            risk = "Low Risk"
+            risk_level = "Low Risk"
 
         return {
-            "prediction_percentage": int(round(output_val * 100)),
-            "risk_level": risk
+            "code": 0,
+            "msg": "success",
+            "user_openid": x_wx_openid, # 自动识别到的微信用户ID
+            "prediction_percentage": percentage,
+            "risk_level": risk_level
         }
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Model error: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=80)
