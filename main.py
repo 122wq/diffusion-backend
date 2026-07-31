@@ -12,7 +12,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 # --- 1. 数据库连接配置 (环境变量防护) ---
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "127.0.0.1:3306")
+MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "172.17.0.7:3306")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "custom_db")
 
 DATABASE_URL = f"mysql+pymysql://{MYSQL_USERNAME}:{MYSQL_PASSWORD}@{MYSQL_ADDRESS}/{MYSQL_DATABASE}?charset=utf8mb4"
