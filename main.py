@@ -10,8 +10,8 @@ from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, 
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 # --- 1. 数据库连接配置 (环境变量防护) ---
-MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "jack")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "Wccf2003")
 MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "172.17.0.7:3306")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "custom_db")
 
