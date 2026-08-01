@@ -182,7 +182,7 @@ async def get_history(
     try:
         user_openid = x_wx_openid or "anonymous"
         records = db.query(PredictionRecord).filter(
-            PredictionRecord.openid == user_openid
+            PredictionRecord._openid == user_openid
         ).order_by(PredictionRecord.created_at.desc()).limit(50).all()
 
         result = []
