@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # --- 1. 读取云托管自动注入的环境变量 ---
 
-DB_HOST = os.getenv("DB_HOST", "cynosdbmysql-grp-qj85u8vm.sql.tencentcdb.com")
+DB_HOST = os.getenv("DB_HOST", "sh-cynosdbmysql-grp-qj85u8vm.sql.tencentcdb.com")
 DB_PORT = os.getenv("DB_PORT", "25802")
 DB_USER = os.getenv("DB_USER", "jack")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")  # 必须能读取到正确密码
