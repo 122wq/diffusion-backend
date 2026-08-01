@@ -42,7 +42,7 @@ class PredictionRecord(Base):
     __tablename__ = "predictions"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    openid = Column(String(64), index=True)
+    _openid = Column(String(64), index=True)
     cfbg = Column(Float)
     cdbp = Column(Float)
     egfr = Column(Float)
@@ -145,7 +145,7 @@ async def predict_data(
         # 2. 保存到 MySQL 数据库
         try:
             record = PredictionRecord(
-                openid=x_wx_openid or "anonymous",
+                _openid=x_wx_openid or "anonymous",
                 cfbg=data.cfbg,
                 cdbp=data.cDBP,
                 egfr=data.eGFR,
@@ -204,6 +204,25 @@ async def get_history(
     except Exception as e:
         logger.error(f"查询历史失败: {e}")
         return {"code": 0, "data": []}
+
+# --- 3. 清空当前用户的历史记录 ---
+@app.delete("/history/clear")
+async def clear_history(
+    db: Session = Depends(get_db),
+    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
+):
+    user_openid = x_wx_openid or "anonymous"
+    try:
+        # 删除当前 OpenID 的所有预测记录
+        deleted_count = db.query(PredictionRecord).filter(
+            PredictionRecord.openid == user_openid
+        ).delete()
+        
+        db.commit()
+        return {"code": 0, "msg": f"成功清空 {deleted_count} 条历史记录"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"清空记录失败: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
