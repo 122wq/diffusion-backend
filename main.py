@@ -9,15 +9,16 @@ from scipy.special import softmax
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-# --- 1. 数据库连接配置 (环境变量防护) ---
-MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "jack")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "Wccf2003")
-MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "172.17.0.7:3306")
-MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "cloud1-d8g5he955c1d2cf68")
+# --- 1. 数据库连接配置 (纯动态读取云托管注入) ---
+# 注意：切勿在默认值中硬编码静态内网 IP！
+MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "localhost:3306")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "custom_db")
 
 DATABASE_URL = f"mysql+pymysql://{MYSQL_USERNAME}:{MYSQL_PASSWORD}@{MYSQL_ADDRESS}/{MYSQL_DATABASE}?charset=utf8mb4"
 
-# 设置合理的超时时间，防止阻塞服务启动
+# 配置防死锁超时参数
 engine = create_engine(
     DATABASE_URL, 
     pool_pre_ping=True, 
@@ -101,6 +102,7 @@ def health_check():
 
 # --- 3. 预测接口 ---
 @app.post("/predict")
+@app.post("/predict")
 async def predict_data(
     data: PredictionData,
     db: Session = Depends(get_db),
@@ -109,11 +111,11 @@ async def predict_data(
     if sess is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="ONNX model is not loaded on server. Check server logs."
+            detail="ONNX model is not loaded on server."
         )
 
     try:
-        # 模型推理
+        # 1. 优先执行 ONNX 模型推理
         cond_input = np.array([[
             data.cfbg, data.cDBP, data.eGFR, data.bmi, 
             data.nraas_drug_use, data.hypertension_history, data.age
@@ -132,21 +134,25 @@ async def predict_data(
 
         percentage_result = int(round(output_val * 100))
 
-        # 写入数据库记录
-        record = PredictionRecord(
-            openid=x_wx_openid or "anonymous",
-            cfbg=data.cfbg,
-            cdbp=data.cDBP,
-            egfr=data.eGFR,
-            bmi=data.bmi,
-            age=int(data.age),
-            nraas_drug_use=data.nraas_drug_use,
-            hypertension_history=data.hypertension_history,
-            prediction_percentage=percentage_result,
-            risk_level=risk
-        )
-        db.add(record)
-        db.commit()
+        # 2. 尝试写入数据库（如果 DB 异常仅打印 Log，不影响前端拿结果）
+        try:
+            record = PredictionRecord(
+                openid=x_wx_openid or "anonymous",
+                cfbg=data.cfbg,
+                cdbp=data.cDBP,
+                egfr=data.eGFR,
+                bmi=data.bmi,
+                age=int(data.age),
+                nraas_drug_use=data.nraas_drug_use,
+                hypertension_history=data.hypertension_history,
+                prediction_percentage=percentage_result,
+                risk_level=risk
+            )
+            db.add(record)
+            db.commit()
+        except Exception as db_err:
+            db.rollback()
+            print(f"⚠️ Failed to save record to DB: {db_err}")
 
         return {
             "code": 0,
@@ -156,8 +162,7 @@ async def predict_data(
         }
 
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Inference/Database Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Inference Error: {str(e)}")
 
 # --- 4. 历史接口 ---
 @app.get("/history")
