@@ -23,7 +23,7 @@ TABLE_NAME = "predictions"
 
 # 如果使用内网 HTTP REST 服务点，通常为 http://<MYSQL_ADDRESS_IP>/v1/rdb/rest/...
 # 这里演示通过 requests 通用 HTTP 的处理逻辑
-REST_BASE_URL = os.getenv("CLOUDBASE_REST_URL", f"http://{MYSQL_ADDRESS.split(':')[0]}:80/v1/rdb/rest")
+REST_BASE_URL = os.getenv("CLOUDBASE_REST_URL", f"http://{MYSQL_ADDRESS.split(':')[0]}:3306/v1/rdb/rest")
 
 # --- 2. 使用 Lifespan 管理启动与模型加载 ---
 @asynccontextmanager
