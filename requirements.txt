@@ -4,5 +4,4 @@ pydantic==2.5.3
 numpy==1.26.3
 onnxruntime==1.17.0
 scipy==1.12.0
-sqlalchemy==2.0.25
-pymysql==1.1.0
+cloudbase_client
