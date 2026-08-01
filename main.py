@@ -15,13 +15,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- 1. 读取云托管自动注入的环境变量 ---
-MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "jack")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "sh-cynosdbmysql-grp-qj85u8vm.sql.tencentcdb.com:25802")
-MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "cloud1-d8g5he955c1d2cf68")
 
-# 拼接 MySQL 原生 TCP 连接串
-DATABASE_URL = f"mysql+pymysql://{MYSQL_USERNAME}:{MYSQL_PASSWORD}@{MYSQL_ADDRESS}/{MYSQL_DATABASE}?charset=utf8mb4"
+DB_HOST = os.getenv("DB_HOST", "cynosdbmysql-grp-qj85u8vm.sql.tencentcdb.com")
+DB_PORT = os.getenv("DB_PORT", "25802")
+DB_USER = os.getenv("DB_USER", "jack")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")  # 必须能读取到正确密码
+DB_NAME = os.getenv("DB_NAME", "cloud1-d8g5he955c1d2cf68")
+
+# 拼接 SQLAlchemy 数据库 URL
+DATABASE_URL = (
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+)
 
 # 配置 DB 引擎（连接超时设置为 5 秒，防卡死）
 engine = create_engine(
