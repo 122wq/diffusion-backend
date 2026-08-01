@@ -23,7 +23,7 @@ engine = create_engine(
     DATABASE_URL, 
     pool_pre_ping=True, 
     pool_recycle=3600,
-    connect_args={"connect_timeout": 5}
+    connect_args={"connect_timeout": 30}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
