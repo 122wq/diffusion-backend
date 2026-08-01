@@ -215,7 +215,7 @@ async def clear_history(
     try:
         # 删除当前 OpenID 的所有预测记录
         deleted_count = db.query(PredictionRecord).filter(
-            PredictionRecord.openid == user_openid
+            PredictionRecord._openid == user_openid
         ).delete()
         
         db.commit()
