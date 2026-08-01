@@ -1,35 +1,78 @@
 import os
 import logging
-import requests
 import numpy as np
 import onnxruntime as ort
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Header, status
+from fastapi import FastAPI, HTTPException, Header, status, Depends
 from pydantic import BaseModel, Field
 from scipy.special import softmax
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# 全局 ONNX 模型句柄
+# --- 1. 读取云托管自动注入的环境变量 ---
+MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "jack")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "172.0.10.1:3306")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "custom_db")
+
+# 拼接 MySQL 原生 TCP 连接串
+DATABASE_URL = f"mysql+pymysql://{MYSQL_USERNAME}:{MYSQL_PASSWORD}@{MYSQL_ADDRESS}/{MYSQL_DATABASE}?charset=utf8mb4"
+
+# 配置 DB 引擎（连接超时设置为 5 秒，防卡死）
+engine = create_engine(
+    DATABASE_URL, 
+    pool_pre_ping=True, 
+    pool_recycle=3600,
+    connect_args={"connect_timeout": 5}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# 定义 ORM 表模型
+class PredictionRecord(Base):
+    __tablename__ = "predictions"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    openid = Column(String(64), index=True)
+    cfbg = Column(Float)
+    cdbp = Column(Float)
+    egfr = Column(Float)
+    bmi = Column(Float)
+    age = Column(Integer)
+    nraas_drug_use = Column(Float)
+    hypertension_history = Column(Float)
+    prediction_percentage = Column(Integer)
+    risk_level = Column(String(32))
+    created_at = Column(DateTime, server_default=func.now())
+
+# 全局模型句柄
 sess = None
 
-# --- 1. 读取微信云托管环境变量 ---
-# 云托管在绑定数据库后会自动注入 MYSQL_ADDRESS 等配置
-MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "172.17.0.7:3306")
-TABLE_NAME = "predictions"
+# 获取数据库 Session 依赖
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# 如果使用内网 HTTP REST 服务点，通常为 http://<MYSQL_ADDRESS_IP>/v1/rdb/rest/...
-# 这里演示通过 requests 通用 HTTP 的处理逻辑
-REST_BASE_URL = os.getenv("CLOUDBASE_REST_URL", f"http://{MYSQL_ADDRESS.split(':')[0]}:3306/v1/rdb/rest")
-
-# --- 2. 使用 Lifespan 管理启动与模型加载 ---
+# --- 2. 使用 Lifespan 管理启动与数据库建表 ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global sess
-    # 安全加载 ONNX 扩散模型
+    # 2.1 初始化建表
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ MySQL 数据库连接成功，数据表初始化完成。")
+    except Exception as e:
+        logger.error(f"⚠️ 数据库建表失败 (将在接口调用时重试): {e}")
+
+    # 2.2 加载 ONNX 模型
     try:
         model_path = os.path.join(os.path.dirname(__file__), "onnx_diffusion.onnx")
         sess = ort.InferenceSession(model_path)
@@ -41,9 +84,8 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("🛑 Service shutting down...")
 
-app = FastAPI(title="Diffusion Model Risk Predictor - CloudBase REST", lifespan=lifespan)
+app = FastAPI(title="Diffusion Model Risk Predictor", lifespan=lifespan)
 
-# 请求体数据结构校验
 class PredictionData(BaseModel):
     cfbg: float
     cDBP: float
@@ -53,61 +95,23 @@ class PredictionData(BaseModel):
     hypertension_history: float
     age: float = Field(..., ge=0, le=100)
 
-# --- 3. 数据库操作函数 (基于标准 requests) ---
-
-def save_prediction_to_cloudbase(record_data: Dict[str, Any]) -> bool:
-    """使用 requests 提交预测结果到云托管数据库 REST 接口"""
-    url = f"{REST_BASE_URL}/{TABLE_NAME}"
-    try:
-        # 设置短超时，防止影响主流程响应
-        resp = requests.post(url, json=record_data, timeout=3)
-        if resp.status_code in (200, 201):
-            logger.info("✅ 数据成功存入 CloudBase")
-            return True
-        else:
-            logger.warning(f"⚠️ 数据库返回非 200 响应: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ 请求 CloudBase REST API 异常: {str(e)}")
-        return False
-
-def get_history_from_cloudbase(openid: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """使用 requests 从云托管数据库 REST 接口查询历史记录"""
-    url = f"{REST_BASE_URL}/{TABLE_NAME}"
-    params = {
-        "limit": limit,
-        "order": "created_at desc",
-        "where": f"openid='{openid}'"
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=3)
-        if resp.status_code == 200:
-            res_json = resp.json()
-            if isinstance(res_json, dict) and "data" in res_json:
-                return res_json.get("data", [])
-            elif isinstance(res_json, list):
-                return res_json
-        return []
-    except Exception as e:
-        logger.error(f"❌ 查询历史记录异常: {str(e)}")
-        return []
-
-# --- 4. API 路由接口 ---
+# --- 3. 路由接口 ---
 
 @app.get("/")
 def health_check():
-    """健康检查探针"""
-    return {
-        "status": "ok", 
-        "model_loaded": sess is not None
-    }
+    return {"status": "ok", "model_loaded": sess is not None}
+
+# 解决腾讯云健康检查 /__tcb_probe__ 报 404 的问题
+@app.get("/__tcb_probe__")
+def tcb_probe():
+    return {"status": "ok"}
 
 @app.post("/predict")
 async def predict_data(
     data: PredictionData,
+    db: Session = Depends(get_db),
     x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
 ):
-    """风险模型推理并将记录存入 CloudBase"""
     if sess is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -115,7 +119,7 @@ async def predict_data(
         )
 
     try:
-        # 1. 运算 ONNX 扩散模型
+        # 1. ONNX 模型推理
         cond_input = np.array([[
             data.cfbg, data.cDBP, data.eGFR, data.bmi, 
             data.nraas_drug_use, data.hypertension_history, data.age
@@ -125,7 +129,6 @@ async def predict_data(
         output_fake = softmax(outputs[0], axis=1)
         output_val = float(output_fake[0, 1])
 
-        # 判断风险等级
         if output_val > 0.692:
             risk = "High Risk"
         elif output_val > 0.515:
@@ -135,22 +138,26 @@ async def predict_data(
 
         percentage_result = int(round(output_val * 100))
 
-        # 2. 组装记录
-        record = {
-            "openid": x_wx_openid or "anonymous",
-            "cfbg": data.cfbg,
-            "cdbp": data.cDBP,
-            "egfr": data.eGFR,
-            "bmi": data.bmi,
-            "age": int(data.age),
-            "nraas_drug_use": data.nraas_drug_use,
-            "hypertension_history": data.hypertension_history,
-            "prediction_percentage": percentage_result,
-            "risk_level": risk
-        }
-        
-        # 3. 保存记录（捕获异常，确保即使数据库不可用也不阻断推理结果返回）
-        save_prediction_to_cloudbase(record)
+        # 2. 保存到 MySQL 数据库
+        try:
+            record = PredictionRecord(
+                openid=x_wx_openid or "anonymous",
+                cfbg=data.cfbg,
+                cdbp=data.cDBP,
+                egfr=data.eGFR,
+                bmi=data.bmi,
+                age=int(data.age),
+                nraas_drug_use=data.nraas_drug_use,
+                hypertension_history=data.hypertension_history,
+                prediction_percentage=percentage_result,
+                risk_level=risk
+            )
+            db.add(record)
+            db.commit() # 🎯 执行真正的 SQL 写入
+            logger.info("✅ 成功写入记录到 MySQL")
+        except Exception as db_err:
+            db.rollback()
+            logger.error(f"⚠️ 写入数据库失败: {db_err}")
 
         return {
             "code": 0,
@@ -165,13 +172,34 @@ async def predict_data(
 
 @app.get("/history")
 async def get_history(
+    db: Session = Depends(get_db),
     x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
 ):
-    """获取以往评估数据"""
-    user_openid = x_wx_openid or "anonymous"
-    records = get_history_from_cloudbase(openid=user_openid)
+    try:
+        user_openid = x_wx_openid or "anonymous"
+        records = db.query(PredictionRecord).filter(
+            PredictionRecord.openid == user_openid
+        ).order_by(PredictionRecord.created_at.desc()).limit(50).all()
 
-    return {"code": 0, "data": records}
+        result = []
+        for r in records:
+            result.append({
+                "id": r.id,
+                "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "",
+                "cfbg": r.cfbg,
+                "cdbp": r.cdbp,
+                "egfr": r.egfr,
+                "bmi": r.bmi,
+                "age": r.age,
+                "hypertension_history": r.hypertension_history,
+                "prediction_percentage": r.prediction_percentage,
+                "risk_level": r.risk_level
+            })
+
+        return {"code": 0, "data": result}
+    except Exception as e:
+        logger.error(f"查询历史失败: {e}")
+        return {"code": 0, "data": []}
 
 if __name__ == "__main__":
     import uvicorn
