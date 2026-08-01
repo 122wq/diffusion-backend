@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 # --- 1. 读取云托管自动注入的环境变量 ---
 MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "jack")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "172.17.0.7:3306")
-MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "custom_db")
+MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "sh-cynosdbmysql-grp-qj85u8vm.sql.tencentcdb.com:25802")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "cloud1-d8g5he955c1d2cf68")
 
 # 拼接 MySQL 原生 TCP 连接串
 DATABASE_URL = f"mysql+pymysql://{MYSQL_USERNAME}:{MYSQL_PASSWORD}@{MYSQL_ADDRESS}/{MYSQL_DATABASE}?charset=utf8mb4"
