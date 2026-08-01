@@ -1,5 +1,6 @@
 import os
 import logging
+import requests
 import numpy as np
 import onnxruntime as ort
 from typing import Optional, List, Dict, Any
@@ -8,12 +9,6 @@ from fastapi import FastAPI, HTTPException, Header, status
 from pydantic import BaseModel, Field
 from scipy.special import softmax
 
-# 引入 CloudBase Client SDK
-try:
-    from cloudbase_client import cloudbase
-except ImportError:
-    cloudbase = None
-
 # 配置日志
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,7 +16,16 @@ logger = logging.getLogger(__name__)
 # 全局 ONNX 模型句柄
 sess = None
 
-# --- 1. 使用 Lifespan 管理启动与模型加载 ---
+# --- 1. 读取微信云托管环境变量 ---
+# 云托管在绑定数据库后会自动注入 MYSQL_ADDRESS 等配置
+MYSQL_ADDRESS = os.getenv("MYSQL_ADDRESS", "127.0.0.1:3306")
+TABLE_NAME = "predictions"
+
+# 如果使用内网 HTTP REST 服务点，通常为 http://<MYSQL_ADDRESS_IP>/v1/rdb/rest/...
+# 这里演示通过 requests 通用 HTTP 的处理逻辑
+REST_BASE_URL = os.getenv("CLOUDBASE_REST_URL", f"http://{MYSQL_ADDRESS.split(':')[0]}:8080/v1/rdb/rest")
+
+# --- 2. 使用 Lifespan 管理启动与模型加载 ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global sess
@@ -37,7 +41,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("🛑 Service shutting down...")
 
-app = FastAPI(title="Diffusion Model Risk Predictor - CloudBase RDB", lifespan=lifespan)
+app = FastAPI(title="Diffusion Model Risk Predictor - CloudBase REST", lifespan=lifespan)
 
 # 请求体数据结构校验
 class PredictionData(BaseModel):
@@ -49,58 +53,53 @@ class PredictionData(BaseModel):
     hypertension_history: float
     age: float = Field(..., ge=0, le=100)
 
-# --- 2. 数据库操作函数 (基于 CloudBase SDK) ---
-TABLE_NAME = "predictions"
+# --- 3. 数据库操作函数 (基于标准 requests) ---
 
 def save_prediction_to_cloudbase(record_data: Dict[str, Any]) -> bool:
-    """通过 CloudBase Rest API 保存数据记录"""
-    if cloudbase is None:
-        logger.warning("⚠️ cloudbase_client SDK 未安装，跳过数据库写入")
-        return False
-    
+    """使用 requests 提交预测结果到云托管数据库 REST 接口"""
+    url = f"{REST_BASE_URL}/{TABLE_NAME}"
     try:
-        endpoint = f"/v1/rdb/rest/{TABLE_NAME}"
-        # 发送 POST 请求插入记录
-        response = cloudbase.request("POST", endpoint, data=record_data)
-        logger.info(f"✅ 数据成功写入 CloudBase: {response}")
-        return True
+        # 设置短超时，防止影响主流程响应
+        resp = requests.post(url, json=record_data, timeout=3)
+        if resp.status_code in (200, 201):
+            logger.info("✅ 数据成功存入 CloudBase")
+            return True
+        else:
+            logger.warning(f"⚠️ 数据库返回非 200 响应: {resp.status_code} - {resp.text}")
+            return False
     except Exception as e:
-        logger.error(f"❌ 写入 CloudBase 数据库失败: {str(e)}")
+        logger.error(f"❌ 请求 CloudBase REST API 异常: {str(e)}")
         return False
 
 def get_history_from_cloudbase(openid: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """通过 CloudBase Rest API 获取用户的历史记录"""
-    if cloudbase is None:
-        logger.warning("⚠️ cloudbase_client SDK 未安装，无法读取历史")
-        return []
-
+    """使用 requests 从云托管数据库 REST 接口查询历史记录"""
+    url = f"{REST_BASE_URL}/{TABLE_NAME}"
+    params = {
+        "limit": limit,
+        "order": "created_at desc",
+        "where": f"openid='{openid}'"
+    }
     try:
-        endpoint = f"/v1/rdb/rest/{TABLE_NAME}"
-        params = {
-            "limit": limit,
-            "order": "created_at desc",
-            "where": f"openid='{openid}'"  # 按 OpenID 筛选
-        }
-        response = cloudbase.request("GET", endpoint, params=params)
-        
-        if response and isinstance(response, dict) and "data" in response:
-            return response.get("data", [])
-        elif isinstance(response, list):
-            return response
+        resp = requests.get(url, params=params, timeout=3)
+        if resp.status_code == 200:
+            res_json = resp.json()
+            if isinstance(res_json, dict) and "data" in res_json:
+                return res_json.get("data", [])
+            elif isinstance(res_json, list):
+                return res_json
         return []
     except Exception as e:
-        logger.error(f"❌ 从 CloudBase 读取历史失败: {str(e)}")
+        logger.error(f"❌ 查询历史记录异常: {str(e)}")
         return []
 
-# --- 3. API 路由接口 ---
+# --- 4. API 路由接口 ---
 
 @app.get("/")
 def health_check():
     """健康检查探针"""
     return {
         "status": "ok", 
-        "model_loaded": sess is not None,
-        "cloudbase_sdk_ready": cloudbase is not None
+        "model_loaded": sess is not None
     }
 
 @app.post("/predict")
@@ -108,7 +107,7 @@ async def predict_data(
     data: PredictionData,
     x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
 ):
-    """风险模型推理并异步存入 CloudBase"""
+    """风险模型推理并将记录存入 CloudBase"""
     if sess is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -136,7 +135,7 @@ async def predict_data(
 
         percentage_result = int(round(output_val * 100))
 
-        # 2. 组装记录并存入 CloudBase 数据库
+        # 2. 组装记录
         record = {
             "openid": x_wx_openid or "anonymous",
             "cfbg": data.cfbg,
@@ -150,7 +149,7 @@ async def predict_data(
             "risk_level": risk
         }
         
-        # 保存到数据库（如果失败仅记录日志，不阻断前端返回结果）
+        # 3. 保存记录（捕获异常，确保即使数据库不可用也不阻断推理结果返回）
         save_prediction_to_cloudbase(record)
 
         return {
