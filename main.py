@@ -273,7 +273,7 @@ async def predict_data(
         # 2. 保存至数据库
         try:
             record = PredictionRecord(
-                _openid=user.openid,  # 使用激活校验返回的医生 OpenID
+                _openid=user._openid,  # 使用激活校验返回的医生 OpenID
                 cfbg=data.cfbg,
                 cdbp=data.cDBP,
                 egfr=data.eGFR,
@@ -286,7 +286,7 @@ async def predict_data(
             )
             db.add(record)
             db.commit()
-            logger.info(f"Prediction result saved for OpenID: {user.openid}")
+            logger.info(f"Prediction result saved for OpenID: {user._openid}")
         except Exception as db_err:
             db.rollback()
             logger.error(f"Failed to save prediction record: {db_err}")
