@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, status, Depends
 from pydantic import BaseModel, Field
 from scipy.special import softmax
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, SmallInteger, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 # 配置日志
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 DB_HOST = os.getenv("DB_HOST", "sh-cynosdbmysql-grp-qj85u8vm.sql.tencentcdb.com")
 DB_PORT = os.getenv("DB_PORT", "25802")
 DB_USER = os.getenv("DB_USER", "jack")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")  # 必须能读取到正确密码
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")  # 读取到正确密码
 DB_NAME = os.getenv("DB_NAME", "cloud1-d8g5he955c1d2cf68")
 
 # 拼接 SQLAlchemy 数据库 URL
@@ -37,7 +37,10 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# 定义 ORM 表模型
+
+# --- 2. ORM 数据表模型定义 ---
+
+# 2.1 预测历史记录表
 class PredictionRecord(Base):
     __tablename__ = "predictions"
 
@@ -54,8 +57,31 @@ class PredictionRecord(Base):
     risk_level = Column(String(32))
     created_at = Column(DateTime, server_default=func.now())
 
-# 全局模型句柄
+
+# 2.2 激活码/邀请码表
+class InviteCode(Base):
+    __tablename__ = "invite_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(32), unique=True, nullable=False, index=True)
+    is_used = Column(SmallInteger, default=0)  # 0: 未使用, 1: 已使用
+    created_at = Column(DateTime, server_default=func.now())
+
+
+# 2.3 授权白名单用户表
+class AllowedUser(Base):
+    __tablename__ = "allowed_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    _openid = Column(String(64), unique=True, nullable=False, index=True)
+    doctor_name = Column(String(50), nullable=False)
+    invite_code = Column(String(32))
+    created_at = Column(DateTime, server_default=func.now())
+
+
+# 全局 ONNX 模型句柄
 sess = None
+
 
 # 获取数据库 Session 依赖
 def get_db():
@@ -65,31 +91,59 @@ def get_db():
     finally:
         db.close()
 
-# --- 2. 使用 Lifespan 管理启动与数据库建表 ---
+
+# --- 3. 授权验证依赖函数 ---
+def verify_allowed_user(
+    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID"),
+    db: Session = Depends(get_db)
+):
+    """
+    拦截未在白名单中的未授权用户
+    """
+    if not x_wx_openid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="无法识别微信用户身份，请从微信小程序端发起调用"
+        )
+    
+    user = db.query(AllowedUser).filter(AllowedUser.openid == x_wx_openid).first()
+    if not user:
+        # 特殊 HTTP 403 提示，供前端捕获并自动弹出激活框
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="UNAUTHORIZED_USER"
+        )
+    return user
+
+
+# --- 4. Lifespan 启动与模型初始化 ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global sess
-    # 2.1 初始化建表
+    # 4.1 初始化自动建表（predictions, invite_codes, allowed_users）
     try:
         Base.metadata.create_all(bind=engine)
-        logger.info("✅ MySQL 数据库连接成功，数据表初始化完成。")
+        logger.info("MySQL Database and tables loaded/initialized successfully.")
     except Exception as e:
-        logger.error(f"⚠️ 数据库建表失败 (将在接口调用时重试): {e}")
+        logger.error(f"Database table creation failed: {e}")
 
-    # 2.2 加载 ONNX 模型
+    # 4.2 加载 ONNX 模型
     try:
         model_path = os.path.join(os.path.dirname(__file__), "onnx_diffusion.onnx")
         sess = ort.InferenceSession(model_path)
-        logger.info("✅ ONNX Diffusion Model loaded successfully.")
+        logger.info("ONNX Diffusion Model loaded successfully.")
     except Exception as e:
-        logger.error(f"❌ Error loading ONNX model: {e}")
+        logger.error(f"Error loading ONNX model: {e}")
         sess = None
 
     yield
     logger.info("🛑 Service shutting down...")
 
+
 app = FastAPI(title="Diffusion Model Risk Predictor", lifespan=lifespan)
 
+
+# --- Pydantic 数据请求模型 ---
 class PredictionData(BaseModel):
     cfbg: float
     cDBP: float
@@ -99,22 +153,96 @@ class PredictionData(BaseModel):
     hypertension_history: float
     age: float = Field(..., ge=0, le=100)
 
-# --- 3. 路由接口 ---
+
+class ActivateRequest(BaseModel):
+    doctor_name: str
+    invite_code: str
+
+
+# --- 5. 路由接口定义 ---
 
 @app.get("/")
 def health_check():
     return {"status": "ok", "model_loaded": sess is not None}
+
 
 # 解决腾讯云健康检查 /__tcb_probe__ 报 404 的问题
 @app.get("/__tcb_probe__")
 def tcb_probe():
     return {"status": "ok"}
 
+
+# 5.1 检查用户授权状态接口
+@app.get("/user/check_auth")
+async def check_user_auth(
+    db: Session = Depends(get_db),
+    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
+):
+    if not x_wx_openid:
+        return {"code": 0, "is_authorized": False, "msg": "未获取到 OpenID"}
+    
+    user = db.query(AllowedUser).filter(AllowedUser.openid == x_wx_openid).first()
+    if user:
+        return {
+            "code": 0, 
+            "is_authorized": True, 
+            "doctor_name": user.doctor_name
+        }
+    return {"code": 0, "is_authorized": False}
+
+
+# 5.2 激活码绑定/激活接口
+@app.post("/user/activate")
+async def activate_user(
+    req: ActivateRequest,
+    db: Session = Depends(get_db),
+    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
+):
+    if not x_wx_openid:
+        raise HTTPException(status_code=400, detail="未获取到微信身份 (OpenID)")
+
+    # 1. 检查当前 OpenID 是否已存在于白名单
+    existing_user = db.query(AllowedUser).filter(AllowedUser.openid == x_wx_openid).first()
+    if existing_user:
+        return {"code": 0, "msg": "您已绑定授权，无需重复激活"}
+
+    # 2. 校验激活码是否有效且未被占用
+    clean_code = req.invite_code.strip()
+    code_obj = db.query(InviteCode).filter(
+        InviteCode.code == clean_code,
+        InviteCode.is_used == 0
+    ).first()
+
+    if not code_obj:
+        raise HTTPException(status_code=400, detail="激活码无效或已被使用，请核对后重试")
+
+    try:
+        # 3. 标记激活码已被使用
+        code_obj.is_used = 1
+        
+        # 4. 将该医生绑定进 AllowedUser 白名单
+        new_user = AllowedUser(
+            _openid=x_wx_openid,
+            doctor_name=req.doctor_name.strip(),
+            invite_code=clean_code
+        )
+        db.add(new_user)
+        db.commit()
+
+        logger.info(f"Doctor [{req.doctor_name.strip()}] activated successfully with code [{clean_code}].")
+        return {"code": 0, "msg": "系统激活成功！欢迎使用"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Activation failure: {e}")
+        raise HTTPException(status_code=500, detail=f"激活失败: {str(e)}")
+
+
+# 5.3 核心预测 API（受 `verify_allowed_user` 保护）
 @app.post("/predict")
 async def predict_data(
     data: PredictionData,
     db: Session = Depends(get_db),
-    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
+    user: AllowedUser = Depends(verify_allowed_user)  # 👈 仅限已激活医生访问
 ):
     if sess is None:
         raise HTTPException(
@@ -123,7 +251,7 @@ async def predict_data(
         )
 
     try:
-        # 1. ONNX 模型推理
+        # 1. ONNX 扩散模型推理
         cond_input = np.array([[
             data.cfbg, data.cDBP, data.eGFR, data.bmi, 
             data.nraas_drug_use, data.hypertension_history, data.age
@@ -142,10 +270,10 @@ async def predict_data(
 
         percentage_result = int(round(output_val * 100))
 
-        # 2. 保存到 MySQL 数据库
+        # 2. 保存至数据库
         try:
             record = PredictionRecord(
-                _openid=x_wx_openid or "anonymous",
+                _openid=user.openid,  # 使用激活校验返回的医生 OpenID
                 cfbg=data.cfbg,
                 cdbp=data.cDBP,
                 egfr=data.eGFR,
@@ -157,11 +285,11 @@ async def predict_data(
                 risk_level=risk
             )
             db.add(record)
-            db.commit() # 🎯 执行真正的 SQL 写入
-            logger.info("✅ 成功写入记录到 MySQL")
+            db.commit()
+            logger.info(f"Prediction result saved for OpenID: {user.openid}")
         except Exception as db_err:
             db.rollback()
-            logger.error(f"⚠️ 写入数据库失败: {db_err}")
+            logger.error(f"Failed to save prediction record: {db_err}")
 
         return {
             "code": 0,
@@ -170,19 +298,22 @@ async def predict_data(
             "risk_level": risk
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"推理处理失败: {str(e)}")
+        logger.error(f"Model inference error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Inference Error: {str(e)}")
 
+
+# 5.4 获取以往评估历史记录（受 `verify_allowed_user` 保护）
 @app.get("/history")
 async def get_history(
     db: Session = Depends(get_db),
-    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
+    user: AllowedUser = Depends(verify_allowed_user)  # 👈 仅限已激活医生访问
 ):
     try:
-        user_openid = x_wx_openid or "anonymous"
         records = db.query(PredictionRecord).filter(
-            PredictionRecord._openid == user_openid
+            PredictionRecord._openid == user._openid
         ).order_by(PredictionRecord.created_at.desc()).limit(50).all()
 
         result = []
@@ -202,27 +333,28 @@ async def get_history(
 
         return {"code": 0, "data": result}
     except Exception as e:
-        logger.error(f"查询历史失败: {e}")
+        logger.error(f"Query history failed: {e}")
         return {"code": 0, "data": []}
 
-# --- 3. 清空当前用户的历史记录 ---
+
+# 5.5 清空当前医生的评估历史记录（受 `verify_allowed_user` 保护）
 @app.delete("/history/clear")
 async def clear_history(
     db: Session = Depends(get_db),
-    x_wx_openid: Optional[str] = Header(None, alias="X-WX-OPENID")
+    user: AllowedUser = Depends(verify_allowed_user)  # 👈 仅限已激活医生访问
 ):
-    user_openid = x_wx_openid or "anonymous"
     try:
-        # 删除当前 OpenID 的所有预测记录
         deleted_count = db.query(PredictionRecord).filter(
-            PredictionRecord._openid == user_openid
+            PredictionRecord._openid == user._openid
         ).delete()
         
         db.commit()
         return {"code": 0, "msg": f"成功清空 {deleted_count} 条历史记录"}
     except Exception as e:
         db.rollback()
+        logger.error(f"Clear history failed: {e}")
         raise HTTPException(status_code=500, detail=f"清空记录失败: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
