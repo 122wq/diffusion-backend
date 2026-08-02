@@ -262,11 +262,11 @@ async def predict_data(
         output_val = float(output_fake[0, 1])
 
         if output_val > 0.692:
-            risk = "High Risk"
+            risk = "高风险"
         elif output_val > 0.515:
-            risk = "Medium Risk"
+            risk = "中等风险"
         else:
-            risk = "Low Risk"
+            risk = "低风险"
 
         percentage_result = int(round(output_val * 100))
 
