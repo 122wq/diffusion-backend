@@ -106,7 +106,7 @@ def verify_allowed_user(
             detail="无法识别微信用户身份，请从微信小程序端发起调用"
         )
     
-    user = db.query(AllowedUser).filter(AllowedUser.openid == x_wx_openid).first()
+    user = db.query(AllowedUser).filter(AllowedUser._openid == x_wx_openid).first()
     if not user:
         # 特殊 HTTP 403 提示，供前端捕获并自动弹出激活框
         raise HTTPException(
@@ -181,7 +181,7 @@ async def check_user_auth(
     if not x_wx_openid:
         return {"code": 0, "is_authorized": False, "msg": "未获取到 OpenID"}
     
-    user = db.query(AllowedUser).filter(AllowedUser.openid == x_wx_openid).first()
+    user = db.query(AllowedUser).filter(AllowedUser._openid == x_wx_openid).first()
     if user:
         return {
             "code": 0, 
@@ -202,7 +202,7 @@ async def activate_user(
         raise HTTPException(status_code=400, detail="未获取到微信身份 (OpenID)")
 
     # 1. 检查当前 OpenID 是否已存在于白名单
-    existing_user = db.query(AllowedUser).filter(AllowedUser.openid == x_wx_openid).first()
+    existing_user = db.query(AllowedUser).filter(AllowedUser._openid == x_wx_openid).first()
     if existing_user:
         return {"code": 0, "msg": "您已绑定授权，无需重复激活"}
 
