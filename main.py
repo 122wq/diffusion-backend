@@ -63,7 +63,7 @@ class InviteCode(Base):
     __tablename__ = "invite_codes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(32), unique=True, nullable=False, index=True)
+    code = Column(String(32, collation = "utf8mb4_bin"), unique=True, nullable=False, index=True)
     is_used = Column(SmallInteger, default=0)  # 0: 未使用, 1: 已使用
     created_at = Column(DateTime, server_default=func.now())
 
